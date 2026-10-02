@@ -2,7 +2,7 @@
 // @id              taskbar-ai-quota
 // @name            Taskbar AI Quota Bars
 // @description     Shows configurable AI agent/LLM subscription quota bars for Anthropic, OpenAI, and Google Antigravity on the Windows 11 taskbar
-// @version         1.6.7
+// @version         1.6.8
 // @author          Cleroth
 // @github          https://github.com/Cleroth
 // @include         explorer.exe
@@ -4720,7 +4720,7 @@ static Grid BuildQuotaGrid(QuotaUiInstance& state) {
                         e.Handled(true);
                         return;
                     }
-                    if (visualTestMode) {
+                    if (visualTestMode || (GetKeyState(VK_CONTROL) & 0x8000)) {
                         OpenSettingsWindow();
                         e.Handled(true);
                         return;
@@ -5408,7 +5408,9 @@ static void UpdateQuotaUi(QuotaUiInstance& state) {
                    d.needsLogin ? L" - click to sign in" :
                    clickAction == ClickAction::OpenDashboard && accounts[i].provider != L"antigravity"
                        ? L" - click to open dashboard" :
+                   d.retryDeadlineMs > now ? L" - waiting for automatic retry" :
                    L" - click to refresh";
+            if (!visualTestMode) tip += L"\nCtrl+click to open Settings";
 
             if (tip != ap.tip) {
                 // Keep the attached ToolTip object alive so an in-place refresh doesn't reset

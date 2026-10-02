@@ -19,6 +19,14 @@ Resetting Layout restores Left. Accounts and encrypted sign-ins are preserved.
 settings, and stable account identities. `Upgrade-Local.ps1` upgrades this
 machine's 1.6.6 installation while retaining mod-owned storage.
 
+Version 1.6.8 adds **Ctrl+left-click** on any quota account to open Settings,
+independent of taskbar right-click overrides and the configured click action.
+The tooltip shows this shortcut and says **waiting for automatic retry** while
+an API retry delay is active. Manual refresh already respects Retry-After and
+does not bypass the provider's cooldown. Gray bars indicate stale/missing data,
+not a changed color palette. Upgrade with `Upgrade-Local.ps1 -ExpectedVersion
+<installed-version>`.
+
 See [SECURITY-REVIEW.md](SECURITY-REVIEW.md) for the review and test limits.
 `Build-Local.ps1` compiles against this machine's Windhawk 1.7.3 without the shim.
 `Test-NetworkPolicy.ps1` checks normal responses and redirect blocking using

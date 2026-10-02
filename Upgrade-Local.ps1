@@ -1,4 +1,5 @@
 #requires -Version 7.0
+param([string]$ExpectedVersion = '1.6.7')
 $ErrorActionPreference = 'Stop'
 $base = 'HKLM:\SOFTWARE\Windhawk\Engine\Mods\local@taskbar-ai-quota'
 $build = Join-Path $PSScriptRoot 'build'
@@ -8,7 +9,7 @@ try {
     $old = Get-ItemProperty $base
     $manifest = Get-Content "$build\manifest.json" -Raw | ConvertFrom-Json
     $old | Select-Object Version,LibraryFileName,Disabled | ConvertTo-Json | Set-Content "$build\upgrade-before.json"
-    if ($old.Version -ne '1.6.6') { throw 'Expected the reviewed 1.6.6 installation' }
+    if ($old.Version -ne $ExpectedVersion) { throw "Expected installation version $ExpectedVersion" }
     $destination = "C:\ProgramData\Windhawk\Engine\Mods\64\$($manifest.dll)"
     Copy-Item "$build\$($manifest.dll)" $destination
     if ((Get-FileHash $destination).Hash -ne $manifest.sha256) { throw 'DLL hash mismatch' }
