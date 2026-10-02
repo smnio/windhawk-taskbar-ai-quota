@@ -1,5 +1,30 @@
 # Taskbar AI Quota Bars
 
+## smnio fork
+
+Personal fork: https://github.com/smnio/windhawk-taskbar-ai-quota/tree/safety-test.
+Based on upstream commit `ea63812` (1.6.5). Version 1.6.6 adds fail-closed
+redirect blocking to both provider HTTP and Antigravity loopback HTTP requests.
+Browser OAuth redirects still work; the change affects only the mod's HTTP client.
+Provider redirects now surface as request failures instead of being followed.
+
+See [SECURITY-REVIEW.md](SECURITY-REVIEW.md) for the review and test limits.
+`Build-Local.ps1` compiles against this machine's Windhawk 1.7.3 without the shim.
+`Test-NetworkPolicy.ps1` checks normal responses and redirect blocking using
+synthetic credentials against loopback test servers. Build artifacts are ignored.
+`Install-Local.ps1` requires elevated PowerShell and refuses to overwrite an
+existing local installation. It checks load, unload, and reload before leaving
+`local@taskbar-ai-quota` enabled. Keep the catalog `taskbar-ai-quota` disabled.
+
+For the first visual test, click the **AI +** tile, choose **Layout & appearance**
+or **Display & colors**, and enable **Preview test data**. This uses temporary
+fake accounts. Disable it when done; closing Settings also ends preview mode.
+Then add an OpenAI account and an Anthropic account on the Accounts page and
+sign in to each yourself. Use a normal cloud polling interval such as five
+minutes. Disable the local mod in Windhawk to remove the taskbar UI.
+
+No scheduled tasks are created by this fork.
+
 Shows Anthropic Claude, OpenAI/Codex, and Google Antigravity AI agent and LLM subscription quota usage as compact bars on the Windows 11 taskbar.
 Can show on the primary taskbar only, all taskbars, or one specific monitor.
 

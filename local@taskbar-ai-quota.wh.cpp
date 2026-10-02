@@ -2,7 +2,7 @@
 // @id              taskbar-ai-quota
 // @name            Taskbar AI Quota Bars
 // @description     Shows configurable AI agent/LLM subscription quota bars for Anthropic, OpenAI, and Google Antigravity on the Windows 11 taskbar
-// @version         1.6.5
+// @version         1.6.6
 // @author          Cleroth
 // @github          https://github.com/Cleroth
 // @include         explorer.exe
@@ -1356,6 +1356,14 @@ struct HttpResult {
     std::string body;
 };
 
+// Credential-bearing requests must remain at the explicitly selected endpoint.
+// This also prevents loopback CSRF headers from following a redirect off-machine.
+static bool DisableHttpRedirects(HINTERNET request) {
+    DWORD policy = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
+    return WinHttpSetOption(request, WINHTTP_OPTION_REDIRECT_POLICY,
+                            &policy, sizeof(policy)) != FALSE;
+}
+
 static bool TrackHttpHandle(HINTERNET h) {
     if (!h) return false;
     std::lock_guard<std::mutex> lk(g_httpHandlesMutex);
@@ -1406,7 +1414,7 @@ static HttpResult HttpRequest(PCWSTR method, PCWSTR host, PCWSTR path, PCWSTR us
         if (req && !TrackHttpHandle(req)) req = nullptr;
     }
 
-    if (!g_unloading && req &&
+    if (!g_unloading && req && DisableHttpRedirects(req) &&
         WinHttpSendRequest(req, headers.c_str(), (DWORD)headers.size(),
                            body.empty() ? WINHTTP_NO_REQUEST_DATA : (LPVOID)body.data(),
                            (DWORD)body.size(), (DWORD)body.size(), 0) &&
@@ -2869,7 +2877,7 @@ static HttpResult HttpRequestLocal(int port, bool secure, PCWSTR path, PCWSTR cs
         headers += L"\r\n";
     }
 
-    if (!g_unloading && req &&
+    if (!g_unloading && req && DisableHttpRedirects(req) &&
         WinHttpSendRequest(req, headers.c_str(), (DWORD)headers.size(),
                            (LPVOID)body.data(), (DWORD)body.size(), (DWORD)body.size(), 0) &&
         WinHttpReceiveResponse(req, nullptr)) {
