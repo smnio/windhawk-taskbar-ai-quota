@@ -2,7 +2,7 @@
 // @id              taskbar-ai-quota
 // @name            Taskbar AI Quota Bars
 // @description     Shows configurable AI agent/LLM subscription quota bars for Anthropic, OpenAI, and Google Antigravity on the Windows 11 taskbar
-// @version         1.6.9
+// @version         1.6.10
 // @author          Cleroth
 // @github          https://github.com/Cleroth
 // @include         explorer.exe
@@ -4579,6 +4579,8 @@ static Grid BuildQuotaGrid(QuotaUiInstance& state) {
                 track.Child(trackContent);
 
                 Grid barItem;
+                // Hidden quotas must not inflate the widget's first desired height.
+                barItem.Visibility(accounts[i].showBars[w] ? Visibility::Visible : Visibility::Collapsed);
                 double compactLabelFontSize = percentFontSize;
                 barItem.Height(verticalBars ? barLength : barThickness);
                 barItem.HorizontalAlignment(HorizontalAlignment::Center);
@@ -5682,6 +5684,8 @@ static bool InjectQuotaGrid(HWND hWnd) {
         g_uiInjected.store(true, std::memory_order_release);
         state->applied.clear();
         UpdateQuotaUi(*state);
+        // Apply availability-driven row visibility before presenting the final placement.
+        quota.UpdateLayout();
         Wh_Log(L"Injected quota bars into %s", winrt::get_class_name(trayPanel).c_str());
         return true;
     } catch (...) {

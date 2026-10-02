@@ -33,6 +33,11 @@ offsets move the widget up; positive offsets move it down. Grid hosts now align
 the quota widget across all their rows. Layout reset restores Center and offset
 0. Existing accounts, sign-ins, and appearance settings remain intact.
 
+Version 1.6.10 hides unselected quota rows before initial layout and settles
+availability-driven row visibility before completing taskbar injection. This
+prevents unused quota rows from inflating the initial measured widget height.
+The vertical alignment and offset controls remain available.
+
 See [SECURITY-REVIEW.md](SECURITY-REVIEW.md) for the review and test limits.
 `Build-Local.ps1` compiles against this machine's Windhawk 1.7.3 without the shim.
 `Test-NetworkPolicy.ps1` checks normal responses and redirect blocking using
