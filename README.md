@@ -38,6 +38,15 @@ availability-driven row visibility before completing taskbar injection. This
 prevents unused quota rows from inflating the initial measured widget height.
 The vertical alignment and offset controls remain available.
 
+Version 1.6.11 runs quota polling and notifications only in the Explorer process
+that owns the primary taskbar. Folder-only Explorer processes remain dormant,
+preventing duplicate API calls and warnings based on stale settings copies.
+Warnings now fire at most once per account, quota bar, and reset window, with
+deduplication stored across reloads. Usage fluctuations do not re-arm a warning
+within the same window. The notification preference is checked again at dispatch.
+For quotas without a reset timestamp, the warning is at most once per stored
+account/bar. Initial high usage and enabling notifications do not replay warnings.
+
 See [SECURITY-REVIEW.md](SECURITY-REVIEW.md) for the review and test limits.
 `Build-Local.ps1` compiles against this machine's Windhawk 1.7.3 without the shim.
 `Test-NetworkPolicy.ps1` checks normal responses and redirect blocking using
@@ -73,7 +82,7 @@ Hover for percentages, reset times, plan and provider details, errors, and retry
 
 Bars can show compact quota labels (`5h`, `7d`, `Fa`, `Ex`, `Cr`) and percentage text with never, hover, or always visibility plus adaptive, left, center, or right alignment. They use configurable green/yellow/orange/red thresholds, with an optional colorblind palette. Optional pace ticks compare quota usage with elapsed time in each reset window and have caret, full-line, edge-notch, and dot styles with a configurable color. Stale errors can mark labels and tooltips with `!`.
 
-It can also fire a Windows notification when an account first crosses the red threshold on a selected bar, so you don't have to keep glancing at the bars. The notification re-arms once usage drops back below the threshold.
+It can also fire a Windows notification when an account first crosses the red threshold on a selected bar. Each account and bar warns at most once per reset window, including across mod reloads. Disabling notifications prevents new warnings.
 
 ## Setup
 

@@ -2,7 +2,7 @@
 // @id              taskbar-ai-quota
 // @name            Taskbar AI Quota Bars
 // @description     Shows configurable AI agent/LLM subscription quota bars for Anthropic, OpenAI, and Google Antigravity on the Windows 11 taskbar
-// @version         1.6.10
+// @version         1.6.11
 // @author          Cleroth
 // @github          https://github.com/Cleroth
 // @include         explorer.exe
@@ -60,6 +60,7 @@ Have a suggestion or found a bug?
 #include <windhawk_utils.h>
 
 #include <windows.h>
+#include <map>
 #include <winternl.h>
 #include <shellapi.h>
 #include <commctrl.h>
@@ -3462,6 +3463,38 @@ static void PostUiUpdate() {
 static const UINT kNotifyIconId = 1;
 static PCWSTR kNotifyClassName = L"AiQuotaNotify_" WH_MOD_ID;
 
+static DWORD PrimaryTaskbarProcessId() {
+    DWORD pid = 0;
+    if (HWND taskbar = FindWindowW(L"Shell_TrayWnd", nullptr)) {
+        GetWindowThreadProcessId(taskbar, &pid);
+    }
+    return pid;
+}
+
+struct ThresholdNotificationState {
+    int above = -1;  // First observation primes the state without sending.
+    bool notified = false;
+    ULONGLONG notifiedReset = 0;
+};
+
+static bool UpdateThresholdNotification(ThresholdNotificationState& state, double pct,
+                                        ULONGLONG reset, int threshold, bool enabled) {
+    if (pct < 0) return false;
+    int previous = state.above;
+    state.above = pct >= threshold ? 1 : 0;
+    if (!enabled || previous != 0 || state.above != 1 ||
+        (state.notified && state.notifiedReset == reset)) return false;
+    state.notified = true;
+    state.notifiedReset = reset;
+    return true;
+}
+
+static std::wstring NotificationStorageKey(uint64_t identity, int bar) {
+    wchar_t key[64];
+    swprintf(key, ARRAYSIZE(key), L"notified_%016llx_%d", (unsigned long long)identity, bar);
+    return key;
+}
+
 // Fetch-thread only. Drops the tray icon, window, and class created on demand.
 static void RemoveNotifyIcon() {
     if (!g_notifyWnd) return;
@@ -3478,6 +3511,10 @@ static void RemoveNotifyIcon() {
 // Fetch-thread only. Lazily creates a hidden message-only window owning one tray
 // icon, then shows a balloon (rendered as a toast on Win11, kept in notify center).
 static void FireThresholdNotification(const std::wstring& title, const std::wstring& body) {
+    if (g_unloading || PrimaryTaskbarProcessId() != GetCurrentProcessId()) return;
+    // Hold through dispatch so a completed disable cannot be followed by a stale send.
+    std::lock_guard<std::mutex> settingsLock(g_settingsMutex);
+    if (!g_settings.enableNotifications) return;
     HINSTANCE hInst = GetModuleHandleW(nullptr);
     auto addNotifyIcon = [](HWND hWnd) {
         NOTIFYICONDATAW nid{};
@@ -3531,6 +3568,11 @@ static void FireThresholdNotification(const std::wstring& title, const std::wstr
 }
 
 static DWORD WINAPI FetchThreadProc(LPVOID) {
+    // Wait through shell startup, then leave folder-only Explorer processes dormant.
+    while (!g_unloading && PrimaryTaskbarProcessId() == 0) {
+        if (WaitForSingleObject(g_stopEvent, 1000) == WAIT_OBJECT_0) return 0;
+    }
+    if (g_unloading || PrimaryTaskbarProcessId() != GetCurrentProcessId()) return 0;
     bool apartmentInitialized = false;
     try {
         winrt::init_apartment(winrt::apartment_type::multi_threaded);
@@ -3541,9 +3583,8 @@ static DWORD WINAPI FetchThreadProc(LPVOID) {
     std::vector<uint64_t> retryIdentityHashes;
     std::vector<ULONGLONG> retryDeadlineMs;
     std::vector<ULONGLONG> nextPollDeadlineMs;
-    // Per-account red-crossing arm state, indexed by QuotaBarIndex:
-    // -1 unknown (primes without firing), 0 below/armed, 1 above/already notified.
-    std::vector<std::array<int, kQuotaBarCount>> redState;
+    // Identity-keyed state survives account reordering and unrelated settings changes.
+    std::map<std::pair<uint64_t, int>, ThresholdNotificationState> notificationStates;
     ULONGLONG lastLoggedSettingsGeneration = 0;
     while (!g_unloading) {
         ULONGLONG refreshGeneration;
@@ -3609,20 +3650,6 @@ static DWORD WINAPI FetchThreadProc(LPVOID) {
         {
             std::lock_guard<std::mutex> lk(g_dataMutex);
             if (g_data.size() == results.size()) results = g_data;
-        }
-        if (settingsChanged || redState.size() != accounts.size()) {
-            redState.assign(accounts.size(),
-                            std::array<int, kQuotaBarCount>{-1, -1, -1, -1});
-            for (size_t i = 0; i < accounts.size(); i++) {
-                const std::array<const WindowUsage*, kQuotaBarCount> usage = {
-                    &results[i].win5h, &results[i].winWeek, &results[i].fableWeek,
-                    &results[i].extraUsage};
-                for (int w = 0; w < kQuotaBarCount; w++) {
-                    if (usage[w]->pct >= 0) {
-                        redState[i][w] = usage[w]->pct >= redThreshold ? 1 : 0;
-                    }
-                }
-            }
         }
 
         int refreshAccountIndex = -1;
@@ -3773,9 +3800,7 @@ static DWORD WINAPI FetchThreadProc(LPVOID) {
             }
         }
         if (published) {
-            // Fire one toast per upward crossing of the red threshold; re-arm when
-            // usage drops back below. A generation-raced result uses current settings and
-            // current pre-publication data so settings edits alone cannot cause a toast.
+            // At most one warning per account/bar/reset window, including across reloads.
             const auto& publishedAccounts = generationRaced ? currentAccounts : accounts;
             const auto& publishedResults = generationRaced ? remappedResults : results;
             const auto& publishedFetchedOk = generationRaced ? remappedFetchedOk : fetchedOk;
@@ -3784,32 +3809,31 @@ static DWORD WINAPI FetchThreadProc(LPVOID) {
                 const std::array<const WindowUsage*, kQuotaBarCount> usage = {
                     &publishedResults[i].win5h, &publishedResults[i].winWeek,
                     &publishedResults[i].fableWeek, &publishedResults[i].extraUsage};
-                const std::array<const WindowUsage*, kQuotaBarCount> previousUsage = {
-                    generationRaced ? &previousCurrentResults[i].win5h : nullptr,
-                    generationRaced ? &previousCurrentResults[i].winWeek : nullptr,
-                    generationRaced ? &previousCurrentResults[i].fableWeek : nullptr,
-                    generationRaced ? &previousCurrentResults[i].extraUsage : nullptr};
                 for (int w = 0; w < kQuotaBarCount; w++) {
                     if (!publishedAccounts[i].showBars[w]) continue;
                     const WindowUsage& wu = *usage[w];
                     if (wu.pct < 0) continue;
-                    bool shouldNotify = false;
-                    if (generationRaced) {
-                        const WindowUsage& previous = *previousUsage[w];
-                        shouldNotify = previous.pct >= 0 &&
-                                       previous.pct < notificationRedThreshold &&
-                                       wu.pct >= notificationRedThreshold &&
-                                       notificationsEnabled;
-                    } else {
-                        int& st = redState[i][w];
-                        if (wu.pct >= notificationRedThreshold) {
-                            shouldNotify = st == 0 && notificationsEnabled;
-                            st = 1;
-                        } else {
-                            st = 0;
+                    auto identity = AccountIdentityHash(publishedAccounts[i]);
+                    auto [entry, inserted] = notificationStates.try_emplace({identity, w});
+                    auto& notification = entry->second;
+                    auto storageKey = NotificationStorageKey(identity, w);
+                    if (inserted) {
+                        wchar_t saved[64]{};
+                        Wh_GetStringValue(storageKey.c_str(), saved, ARRAYSIZE(saved));
+                        wchar_t* end = nullptr;
+                        auto reset = wcstoull(saved, &end, 10);
+                        if (saved[0] && end && !*end) {
+                            notification.notified = true;
+                            notification.notifiedReset = reset;
                         }
                     }
+                    bool shouldNotify = UpdateThresholdNotification(notification, wu.pct,
+                        wu.resetUnixMs, notificationRedThreshold, notificationsEnabled);
                     if (shouldNotify) {
+                        // Persist before dispatch. On failure, suppress rather than repeat.
+                        wchar_t reset[32];
+                        swprintf(reset, ARRAYSIZE(reset), L"%llu", (unsigned long long)wu.resetUnixMs);
+                        if (!Wh_SetStringValue(storageKey.c_str(), reset)) continue;
                         std::wstring providerName =
                             ProviderDisplayName(publishedAccounts[i].provider);
                         wchar_t title[96];
@@ -9309,6 +9333,8 @@ BOOL Wh_ModInit() {
 }
 
 void Wh_ModAfterInit() {
+    DWORD taskbarPid = PrimaryTaskbarProcessId();
+    if (taskbarPid && taskbarPid != GetCurrentProcessId()) return;
     g_fetchThread = CreateThread(nullptr, 0, FetchThreadProc, nullptr, 0, nullptr);
     if (g_fetchThread) {
         g_fetchThreadStarted.store(true, std::memory_order_release);

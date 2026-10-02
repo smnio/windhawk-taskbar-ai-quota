@@ -64,6 +64,38 @@ int main() {
     settings.taskbarSide = static_cast<TaskbarSide>(123);
     NormalizeSettings(&settings);
     Require(settings.taskbarSide == TaskbarSide::Left, "invalid enum normalizes left");
-    std::puts("PASS: side/alignment defaults, placement round-trips, signed offsets, upgrade preservation, identity keys, normalization");
+    ThresholdNotificationState notification;
+    Require(!UpdateThresholdNotification(notification, 20, 1000, 90, true), "initial observation is silent");
+    Require(UpdateThresholdNotification(notification, 95, 1000, 90, true), "first threshold crossing notifies");
+    for (int i = 0; i < 100; ++i) {
+        Require(!UpdateThresholdNotification(notification, 100, 1000, 90, true), "repeated polls do not notify");
+    }
+    Require(!UpdateThresholdNotification(notification, 70, 1000, 90, true) &&
+            !UpdateThresholdNotification(notification, 95, 1000, 90, true),
+            "usage wobble does not re-arm within the same window");
+    Require(!UpdateThresholdNotification(notification, 10, 2000, 90, true) &&
+            UpdateThresholdNotification(notification, 95, 2000, 90, true),
+            "next reset window can notify once");
+    ThresholdNotificationState disabled;
+    Require(!UpdateThresholdNotification(disabled, 10, 1000, 90, false) &&
+            !UpdateThresholdNotification(disabled, 100, 1000, 90, false),
+            "disabled notifications never fire");
+    Require(!UpdateThresholdNotification(disabled, 100, 1000, 90, true),
+            "enabling does not replay an existing high usage warning");
+    ThresholdNotificationState restoredNotification;
+    restoredNotification.notified = true;
+    restoredNotification.notifiedReset = 1000;
+    Require(!UpdateThresholdNotification(restoredNotification, 20, 1000, 90, true) &&
+            !UpdateThresholdNotification(restoredNotification, 95, 1000, 90, true),
+            "persisted window suppresses repeat after reload");
+    ThresholdNotificationState startupHigh;
+    Require(!UpdateThresholdNotification(startupHigh, 100, 1000, 90, true),
+            "startup at an existing high quota does not spam");
+    Require(!UpdateThresholdNotification(notification, -1, 2000, 90, true),
+            "unavailable usage leaves warning state unchanged");
+    Require(NotificationStorageKey(codexIdentity, 0) != NotificationStorageKey(claudeIdentity, 0) &&
+            NotificationStorageKey(codexIdentity, 0) != NotificationStorageKey(codexIdentity, 1),
+            "deduplication is independent per account and quota bar");
+    std::puts("PASS: placement/settings preservation and notification disable, once-per-window, reload, startup, independent quota state");
     winrt::uninit_apartment();
 }
