@@ -8,6 +8,17 @@ redirect blocking to both provider HTTP and Antigravity loopback HTTP requests.
 Browser OAuth redirects still work; the change affects only the mod's HTTP client.
 Provider redirects now surface as request failures instead of being followed.
 
+Version 1.6.7 adds **Taskbar side** immediately after **Specific display** on
+the Layout page. **Left** is the default, including when upgrading settings
+that have no side preference. It reserves a column at the taskbar's left edge,
+before its existing content. **Right (before clock and tray)** keeps the original
+tray placement. Switching sides autosaves and rebuilds the bars on the selected
+monitors. **Right gap (px)** controls the space after the bars in either position.
+Resetting Layout restores Left. Accounts and encrypted sign-ins are preserved.
+`Test-TaskbarSide.ps1` checks both saved positions, migration of non-default
+settings, and stable account identities. `Upgrade-Local.ps1` upgrades this
+machine's 1.6.6 installation while retaining mod-owned storage.
+
 See [SECURITY-REVIEW.md](SECURITY-REVIEW.md) for the review and test limits.
 `Build-Local.ps1` compiles against this machine's Windhawk 1.7.3 without the shim.
 `Test-NetworkPolicy.ps1` checks normal responses and redirect blocking using
@@ -85,6 +96,7 @@ Right-click any quota column and choose **Settings...**. Useful settings include
 - click action: refresh account or open provider dashboard (Antigravity always refreshes)
 - cloud poll interval presets plus a custom interval (Antigravity polls its local server every minute)
 - taskbar monitor mode: primary, all, or a detected display with its resolution
+- taskbar side: left edge (default) or right before the clock and tray
 - color thresholds with palette-matched previews
 - threshold notifications (toast when an account crosses the red threshold)
 - colorblind palette

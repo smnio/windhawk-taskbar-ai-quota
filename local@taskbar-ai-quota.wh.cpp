@@ -2,7 +2,7 @@
 // @id              taskbar-ai-quota
 // @name            Taskbar AI Quota Bars
 // @description     Shows configurable AI agent/LLM subscription quota bars for Anthropic, OpenAI, and Google Antigravity on the Windows 11 taskbar
-// @version         1.6.6
+// @version         1.6.7
 // @author          Cleroth
 // @github          https://github.com/Cleroth
 // @include         explorer.exe
@@ -145,6 +145,8 @@ enum class TaskbarMonitorMode {
     Specific,
 };
 
+enum class TaskbarSide { Right, Left };
+
 enum class ClickAction {
     Refresh,
     OpenDashboard,
@@ -193,6 +195,7 @@ static constexpr COLORREF kDefaultPaceTickColor = RGB(222, 222, 222);
 struct Settings {
     std::vector<AccountConfig> accounts;
     TaskbarMonitorMode taskbarMonitorMode = TaskbarMonitorMode::Primary;
+    TaskbarSide taskbarSide = TaskbarSide::Left;
     ClickAction clickAction = ClickAction::Refresh;
     BarLayout barLayout = BarLayout::Stacked;
     BarMode barMode = BarMode::Used;
@@ -327,6 +330,7 @@ struct QuotaUiInstance {
     Grid quotaGrid{nullptr};
     Panel injectionParent{nullptr};
     ColumnDefinition quotaColumnDefinition{nullptr};
+    ColumnDefinition implicitColumnDefinition{nullptr};
     std::vector<PointerHandlers> pointerHandlers;
     std::vector<MenuItemClickHandler> menuItemClickHandlers;
     std::vector<AccountUiRefs> accountRefs;
@@ -5465,6 +5469,7 @@ static void RemoveQuotaGridFromState(QuotaUiInstance& state) {
         ClearQuotaEventState(state);
         state.quotaGrid = nullptr;
         state.quotaColumnDefinition = nullptr;
+        state.implicitColumnDefinition = nullptr;
         state.applied.clear();
         return;
     }
@@ -5501,6 +5506,14 @@ static void RemoveQuotaGridFromState(QuotaUiInstance& state) {
                 }
             }
         }
+        if (targetGrid && state.implicitColumnDefinition) {
+            auto definitions = targetGrid.ColumnDefinitions();
+            if (definitions.Size() == 1 &&
+                winrt::get_abi(definitions.GetAt(0)) ==
+                    winrt::get_abi(state.implicitColumnDefinition)) {
+                definitions.RemoveAt(0);
+            }
+        }
     } catch (...) {
         Wh_Log(L"RemoveQuotaGrid: exception");
     }
@@ -5508,6 +5521,7 @@ static void RemoveQuotaGridFromState(QuotaUiInstance& state) {
     state.quotaGrid = nullptr;
     state.injectionParent = nullptr;
     state.quotaColumnDefinition = nullptr;
+    state.implicitColumnDefinition = nullptr;
     state.applied.clear();
 }
 
@@ -5552,18 +5566,36 @@ static bool InjectQuotaGrid(HWND hWnd) {
         if (!xamlRoot) return fail(L"no XamlRoot");
         auto root = xamlRoot.Content().try_as<FrameworkElement>();
         if (!root) return fail(L"no XamlRoot content");
-        auto trayFrame = FindChildByName(root, L"SystemTrayFrameGrid");
-        // On a cold start the XamlRoot is ready before the system tray contents are realized
-        // in the visual tree, so SystemTrayFrameGrid may be missing for the first attempts.
-        // Bail and let the retry loop poll until it appears; never inject elsewhere, which
-        // would render the bars on top of the clock/tray.
+        TaskbarSide side;
+        {
+            std::lock_guard<std::mutex> lk(g_settingsMutex);
+            side = g_settings.taskbarSide;
+        }
+        FrameworkElement trayFrame{nullptr};
+        if (side == TaskbarSide::Left) {
+            // Select the repeater's own RootGrid, not an unrelated nested RootGrid.
+            auto repeater = FindChildByName(root, L"TaskbarFrameRepeater");
+            auto ancestor = repeater ? VisualTreeHelper::GetParent(repeater) : nullptr;
+            for (int depth = 0; ancestor && depth < 8; ++depth) {
+                auto element = ancestor.try_as<FrameworkElement>();
+                if (element && element.Name() == L"RootGrid" && element.try_as<Grid>()) {
+                    trayFrame = element;
+                    break;
+                }
+                ancestor = VisualTreeHelper::GetParent(ancestor);
+            }
+            if (!trayFrame) return fail(L"no taskbar RootGrid for left placement");
+        } else {
+            trayFrame = FindChildByName(root, L"SystemTrayFrameGrid");
+        }
+        // Retry until the selected host is realized; do not substitute an overlay host.
         if (!trayFrame) return fail(L"no SystemTrayFrameGrid");
         auto trayPanel = trayFrame.try_as<Panel>();
         auto trayGrid = trayFrame.try_as<Grid>();
         // Newer Windows taskbars keep the name but use a StackPanel. Don't assume other
         // panel types share its child-order layout semantics.
         if (!trayPanel || (!trayGrid && !trayFrame.try_as<StackPanel>())) {
-            std::wstring reason = L"unsupported SystemTrayFrameGrid type: ";
+            std::wstring reason = L"unsupported quota host type: ";
             reason += winrt::get_class_name(trayFrame);
             return fail(reason.c_str());
         }
@@ -5605,6 +5637,13 @@ static bool InjectQuotaGrid(HWND hWnd) {
         }
 
         if (trayGrid) {
+            // Materialize an implicit star column before adding our auto column.
+            if (trayGrid.ColumnDefinitions().Size() == 0) {
+                ColumnDefinition originalColumn;
+                originalColumn.Width({1.0, GridUnitType::Star});
+                state->implicitColumnDefinition = originalColumn;
+                trayGrid.ColumnDefinitions().Append(originalColumn);
+            }
             ColumnDefinition newCol;
             newCol.Width({1.0, GridUnitType::Auto});
             state->quotaColumnDefinition = newCol;
@@ -5661,6 +5700,7 @@ static void ReleaseQuotaUiState(HWND hWnd) {
     state->quotaGrid = nullptr;
     state->injectionParent = nullptr;
     state->quotaColumnDefinition = nullptr;
+    state->implicitColumnDefinition = nullptr;
     state->applied.clear();
     EraseUiState(hWnd);
 }
@@ -5978,6 +6018,7 @@ static void NormalizeSettings(Settings* s) {
         s->accounts[0].hidden = false;
     }
     s->pollMinutes = std::clamp(s->pollMinutes > 0 ? s->pollMinutes : 10, 2, 24 * 60);
+    if (s->taskbarSide != TaskbarSide::Right) s->taskbarSide = TaskbarSide::Left;
     s->taskbarMonitorNumber = std::clamp(s->taskbarMonitorNumber > 0 ?
                                              s->taskbarMonitorNumber : 1, 1, 64);
     s->barLength = std::clamp(s->barLength > 0 ? s->barLength : 100, 10, 500);
@@ -6041,6 +6082,7 @@ static std::wstring SerializeSettings(const Settings& s) {
         setString(L"monitorMode", s.taskbarMonitorMode == TaskbarMonitorMode::All ? L"all" :
                                    s.taskbarMonitorMode == TaskbarMonitorMode::Specific ? L"specific" : L"primary");
         setNumber(L"monitorNumber", s.taskbarMonitorNumber);
+        setString(L"taskbarSide", s.taskbarSide == TaskbarSide::Left ? L"left" : L"right");
         setString(L"clickAction", s.clickAction == ClickAction::OpenDashboard ? L"dashboard" : L"refresh");
         setNumber(L"pollMinutes", s.pollMinutes);
         setNumber(L"barLength", s.barLength);
@@ -6123,6 +6165,8 @@ static bool DeserializeSettings(const std::wstring& json, Settings* out) {
                                monitorMode == L"specific" ? TaskbarMonitorMode::Specific :
                                                             TaskbarMonitorMode::Primary;
         s.taskbarMonitorNumber = (int)GetNum(root, L"monitorNumber", 1);
+        s.taskbarSide = GetStr(root, L"taskbarSide") == L"right" ?
+                            TaskbarSide::Right : TaskbarSide::Left;
         s.clickAction = GetStr(root, L"clickAction") == L"dashboard" ?
                             ClickAction::OpenDashboard : ClickAction::Refresh;
         s.pollMinutes = (int)GetNum(root, L"pollMinutes", 10);
@@ -6510,6 +6554,7 @@ enum SettingsControlId {
 
     kMonitorMode = 2100,
     kMonitorNumber,
+    kTaskbarSide,
     kBarLayout,
     kBarMode,
     kBarLength,
@@ -7528,6 +7573,8 @@ static void RefreshSettingsControls(SettingsWindowState& state) {
                         s.taskbarMonitorMode == TaskbarMonitorMode::All ? 1 :
                         s.taskbarMonitorMode == TaskbarMonitorMode::Specific ? 2 : 0, 0);
     PopulateMonitorCombo(state, s.taskbarMonitorNumber);
+    SendDlgItemMessageW(state.hWnd, kTaskbarSide, CB_SETCURSEL,
+                        s.taskbarSide == TaskbarSide::Left ? 1 : 0, 0);
     SendDlgItemMessageW(state.hWnd, kBarLayout, CB_SETCURSEL,
                         s.barLayout == BarLayout::Vertical ? 1 : 0, 0);
     SendDlgItemMessageW(state.hWnd, kBarMode, CB_SETCURSEL,
@@ -7612,6 +7659,8 @@ static void CommitScalarSettings(SettingsWindowState& state, bool refreshControl
         SendDlgItemMessageW(state.hWnd, kMonitorNumber, CB_GETITEMDATA,
                             monitorSelection, 0) : CB_ERR;
     if (monitorNumber != CB_ERR) s.taskbarMonitorNumber = (int)monitorNumber;
+    s.taskbarSide = SendDlgItemMessageW(state.hWnd, kTaskbarSide, CB_GETCURSEL, 0, 0) == 1 ?
+                        TaskbarSide::Left : TaskbarSide::Right;
     s.barLayout = SendDlgItemMessageW(state.hWnd, kBarLayout, CB_GETCURSEL, 0, 0) == 1 ?
                           BarLayout::Vertical : BarLayout::Stacked;
     s.barMode = SendDlgItemMessageW(state.hWnd, kBarMode, CB_GETCURSEL, 0, 0) == 1 ?
@@ -8417,6 +8466,7 @@ static void ResetCurrentSettingsPage(SettingsWindowState& state) {
     if (page == 1) {
         settings.taskbarMonitorMode = defaults.taskbarMonitorMode;
         settings.taskbarMonitorNumber = defaults.taskbarMonitorNumber;
+        settings.taskbarSide = defaults.taskbarSide;
         settings.barLayout = defaults.barLayout;
         settings.barMode = defaults.barMode;
         settings.barLength = defaults.barLength;
@@ -8533,6 +8583,9 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hWnd, UINT message,
                                         L"Specific display"});
             AddSettingsRow(*state, 1, L"Specific display", L"COMBOBOX",
                            CBS_DROPDOWNLIST, 0, kMonitorNumber);
+            HWND side = AddSettingsRow(*state, 1, L"Taskbar side", L"COMBOBOX",
+                                       CBS_DROPDOWNLIST, 0, kTaskbarSide);
+            AddComboItems(side, {L"Right (before clock and tray)", L"Left"});
             HWND layout = AddSettingsRow(*state, 1, L"Bar layout", L"COMBOBOX",
                                          CBS_DROPDOWNLIST, 0, kBarLayout);
             AddComboItems(layout, {L"Stacked horizontal", L"Vertical"});
@@ -8550,7 +8603,7 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hWnd, UINT message,
             AddNumericRow(*state, 1, L"Account margin (px)", kAccountMargin, 0, 500);
             AddNumericRow(*state, 1, L"Label gap (px)", kLabelGap, 0, 500);
             AddNumericRow(*state, 1, L"Bar gap (px)", kBarGap, 0, 500);
-            AddNumericRow(*state, 1, L"Right tray gap (px)", kRightMargin, 0, 500);
+            AddNumericRow(*state, 1, L"Right gap (px)", kRightMargin, 0, 500);
 
             AddSettingsCheck(*state, 2, L"Preview test data", kVisualTestModeDisplay);
             HWND labelPosition = AddSettingsRow(*state, 2, L"Label position", L"COMBOBOX",
