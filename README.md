@@ -27,6 +27,12 @@ does not bypass the provider's cooldown. Gray bars indicate stale/missing data,
 not a changed color palette. Upgrade with `Upgrade-Local.ps1 -ExpectedVersion
 <installed-version>`.
 
+Version 1.6.9 adds **Vertical alignment** (Top / Center / Bottom, default Center)
+and **Vertical offset (px)** immediately after Taskbar side on Layout. Negative
+offsets move the widget up; positive offsets move it down. Grid hosts now align
+the quota widget across all their rows. Layout reset restores Center and offset
+0. Existing accounts, sign-ins, and appearance settings remain intact.
+
 See [SECURITY-REVIEW.md](SECURITY-REVIEW.md) for the review and test limits.
 `Build-Local.ps1` compiles against this machine's Windhawk 1.7.3 without the shim.
 `Test-NetworkPolicy.ps1` checks normal responses and redirect blocking using
@@ -105,6 +111,7 @@ Right-click any quota column and choose **Settings...**. Useful settings include
 - cloud poll interval presets plus a custom interval (Antigravity polls its local server every minute)
 - taskbar monitor mode: primary, all, or a detected display with its resolution
 - taskbar side: left edge (default) or right before the clock and tray
+- vertical alignment: top, center (default), or bottom, plus a signed vertical offset
 - color thresholds with palette-matched previews
 - threshold notifications (toast when an account crosses the red threshold)
 - colorblind palette

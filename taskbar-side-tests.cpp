@@ -16,6 +16,8 @@ int main() {
     winrt::init_apartment(winrt::apartment_type::multi_threaded);
     Settings settings;
     Require(settings.taskbarSide == TaskbarSide::Left, "new installations default left");
+    Require(settings.verticalAlignment == WidgetVerticalAlignment::Center &&
+            settings.verticalOffset == 0, "vertical default is centered without offset");
     settings.taskbarMonitorMode = TaskbarMonitorMode::Specific;
     settings.taskbarMonitorNumber = 2;
     settings.barLength = 60;
@@ -39,10 +41,29 @@ int main() {
     Require(migrated == settings, "upgrade defaults left and preserves accounts and configuration");
     legacy.SetNamedValue(L"taskbarSide", JsonValue::CreateStringValue(L"invalid"));
     Require(DeserializeSettings(legacy.Stringify().c_str(), &migrated) &&
-            migrated.taskbarSide == TaskbarSide::Left, "invalid stored side defaults left");
+                migrated.taskbarSide == TaskbarSide::Left, "invalid stored side defaults left");
+    for (auto alignment : {WidgetVerticalAlignment::Top, WidgetVerticalAlignment::Center,
+                           WidgetVerticalAlignment::Bottom}) {
+        for (int offset : {-15, 0, 15}) {
+            settings.verticalAlignment = alignment;
+            settings.verticalOffset = offset;
+            Require(DeserializeSettings(SerializeSettings(settings), &migrated) &&
+                    migrated == settings, "vertical alignment and signed offsets round-trip");
+        }
+    }
+    legacy.Remove(L"verticalAlignment");
+    legacy.Remove(L"verticalOffset");
+    Require(DeserializeSettings(legacy.Stringify().c_str(), &migrated) &&
+            migrated.verticalAlignment == WidgetVerticalAlignment::Center &&
+            migrated.verticalOffset == 0, "old settings migrate to center and zero offset");
+    settings.verticalAlignment = static_cast<WidgetVerticalAlignment>(123);
+    settings.verticalOffset = -1000;
+    NormalizeSettings(&settings);
+    Require(settings.verticalAlignment == WidgetVerticalAlignment::Center &&
+            settings.verticalOffset == -100, "vertical alignment normalizes and offset clamps");
     settings.taskbarSide = static_cast<TaskbarSide>(123);
     NormalizeSettings(&settings);
     Require(settings.taskbarSide == TaskbarSide::Left, "invalid enum normalizes left");
-    std::puts("PASS: left default, both side round-trips, upgrade preservation, identity keys, invalid values");
+    std::puts("PASS: side/alignment defaults, placement round-trips, signed offsets, upgrade preservation, identity keys, normalization");
     winrt::uninit_apartment();
 }

@@ -2,7 +2,7 @@
 // @id              taskbar-ai-quota
 // @name            Taskbar AI Quota Bars
 // @description     Shows configurable AI agent/LLM subscription quota bars for Anthropic, OpenAI, and Google Antigravity on the Windows 11 taskbar
-// @version         1.6.8
+// @version         1.6.9
 // @author          Cleroth
 // @github          https://github.com/Cleroth
 // @include         explorer.exe
@@ -146,6 +146,7 @@ enum class TaskbarMonitorMode {
 };
 
 enum class TaskbarSide { Right, Left };
+enum class WidgetVerticalAlignment { Top, Center, Bottom };
 
 enum class ClickAction {
     Refresh,
@@ -196,6 +197,8 @@ struct Settings {
     std::vector<AccountConfig> accounts;
     TaskbarMonitorMode taskbarMonitorMode = TaskbarMonitorMode::Primary;
     TaskbarSide taskbarSide = TaskbarSide::Left;
+    WidgetVerticalAlignment verticalAlignment = WidgetVerticalAlignment::Center;
+    int verticalOffset = 0;
     ClickAction clickAction = ClickAction::Refresh;
     BarLayout barLayout = BarLayout::Stacked;
     BarMode barMode = BarMode::Used;
@@ -4304,11 +4307,15 @@ static Grid BuildQuotaGrid(QuotaUiInstance& state) {
         PaceTickStyle paceTickStyle;
         LabelPosition labelPosition;
         ClickAction clickAction;
+        WidgetVerticalAlignment verticalAlignment;
+        int verticalOffset;
         {
             std::lock_guard<std::mutex> lk(g_settingsMutex);
             state.buildSettingsGeneration = g_settingsGeneration;
             accounts = g_settings.accounts;
             clickAction = g_settings.clickAction;
+            verticalAlignment = g_settings.verticalAlignment;
+            verticalOffset = g_settings.verticalOffset;
             barLayout = g_settings.barLayout;
             barLength = g_settings.barLength;
             barThickness = g_settings.barThickness;
@@ -4336,7 +4343,13 @@ static Grid BuildQuotaGrid(QuotaUiInstance& state) {
         state.accountRefs.clear();
         Grid root;
         root.Name(kRootName);
-        root.VerticalAlignment(VerticalAlignment::Center);
+        root.VerticalAlignment(verticalAlignment == WidgetVerticalAlignment::Top ?
+                                   VerticalAlignment::Top :
+                               verticalAlignment == WidgetVerticalAlignment::Bottom ?
+                                   VerticalAlignment::Bottom : VerticalAlignment::Center);
+        TranslateTransform verticalTranslation;
+        verticalTranslation.Y(verticalOffset);
+        root.RenderTransform(verticalTranslation);
 
         StackPanel panel;
         panel.Orientation(Orientation::Horizontal);
@@ -5656,6 +5669,9 @@ static bool InjectQuotaGrid(HWND hWnd) {
                 if (child) Grid::SetColumn(child, Grid::GetColumn(child) + 1);
             }
             Grid::SetColumn(quota, 0);
+            // Align within the whole host, rather than only its first layout row.
+            Grid::SetRow(quota, 0);
+            Grid::SetRowSpan(quota, std::max(1, (int)trayGrid.RowDefinitions().Size()));
             trayGrid.Children().Append(quota);
         } else {
             // StackPanel layout follows child order; no column is created or owned.
@@ -6021,6 +6037,11 @@ static void NormalizeSettings(Settings* s) {
     }
     s->pollMinutes = std::clamp(s->pollMinutes > 0 ? s->pollMinutes : 10, 2, 24 * 60);
     if (s->taskbarSide != TaskbarSide::Right) s->taskbarSide = TaskbarSide::Left;
+    if (s->verticalAlignment != WidgetVerticalAlignment::Top &&
+        s->verticalAlignment != WidgetVerticalAlignment::Bottom) {
+        s->verticalAlignment = WidgetVerticalAlignment::Center;
+    }
+    s->verticalOffset = std::clamp(s->verticalOffset, -100, 100);
     s->taskbarMonitorNumber = std::clamp(s->taskbarMonitorNumber > 0 ?
                                              s->taskbarMonitorNumber : 1, 1, 64);
     s->barLength = std::clamp(s->barLength > 0 ? s->barLength : 100, 10, 500);
@@ -6085,6 +6106,9 @@ static std::wstring SerializeSettings(const Settings& s) {
                                    s.taskbarMonitorMode == TaskbarMonitorMode::Specific ? L"specific" : L"primary");
         setNumber(L"monitorNumber", s.taskbarMonitorNumber);
         setString(L"taskbarSide", s.taskbarSide == TaskbarSide::Left ? L"left" : L"right");
+        setString(L"verticalAlignment", s.verticalAlignment == WidgetVerticalAlignment::Top ? L"top" :
+                                        s.verticalAlignment == WidgetVerticalAlignment::Bottom ? L"bottom" : L"center");
+        setNumber(L"verticalOffset", s.verticalOffset);
         setString(L"clickAction", s.clickAction == ClickAction::OpenDashboard ? L"dashboard" : L"refresh");
         setNumber(L"pollMinutes", s.pollMinutes);
         setNumber(L"barLength", s.barLength);
@@ -6169,6 +6193,11 @@ static bool DeserializeSettings(const std::wstring& json, Settings* out) {
         s.taskbarMonitorNumber = (int)GetNum(root, L"monitorNumber", 1);
         s.taskbarSide = GetStr(root, L"taskbarSide") == L"right" ?
                             TaskbarSide::Right : TaskbarSide::Left;
+        std::wstring alignment = GetStr(root, L"verticalAlignment");
+        s.verticalAlignment = alignment == L"top" ? WidgetVerticalAlignment::Top :
+                              alignment == L"bottom" ? WidgetVerticalAlignment::Bottom :
+                                                      WidgetVerticalAlignment::Center;
+        s.verticalOffset = (int)GetNum(root, L"verticalOffset", 0);
         s.clickAction = GetStr(root, L"clickAction") == L"dashboard" ?
                             ClickAction::OpenDashboard : ClickAction::Refresh;
         s.pollMinutes = (int)GetNum(root, L"pollMinutes", 10);
@@ -6557,6 +6586,8 @@ enum SettingsControlId {
     kMonitorMode = 2100,
     kMonitorNumber,
     kTaskbarSide,
+    kVerticalAlignment,
+    kVerticalOffset,
     kBarLayout,
     kBarMode,
     kBarLength,
@@ -6946,7 +6977,7 @@ static HWND AddSettingsRow(SettingsWindowState& state, int page, PCWSTR labelTex
 static HWND AddNumericRow(SettingsWindowState& state, int page, PCWSTR labelText, int id,
                           int minimum, int maximum, bool addSlider = false,
                           int sliderMaximum = -1) {
-    HWND edit = AddSettingsRow(state, page, labelText, L"EDIT", ES_NUMBER,
+    HWND edit = AddSettingsRow(state, page, labelText, L"EDIT", minimum < 0 ? 0 : ES_NUMBER,
                                WS_EX_CLIENTEDGE, id);
     SettingsRow& row = state.rows[page].back();
     row.minimum = minimum;
@@ -7577,6 +7608,9 @@ static void RefreshSettingsControls(SettingsWindowState& state) {
     PopulateMonitorCombo(state, s.taskbarMonitorNumber);
     SendDlgItemMessageW(state.hWnd, kTaskbarSide, CB_SETCURSEL,
                         s.taskbarSide == TaskbarSide::Left ? 1 : 0, 0);
+    SendDlgItemMessageW(state.hWnd, kVerticalAlignment, CB_SETCURSEL,
+                        (int)s.verticalAlignment, 0);
+    SetControlInt(state, kVerticalOffset, s.verticalOffset);
     SendDlgItemMessageW(state.hWnd, kBarLayout, CB_SETCURSEL,
                         s.barLayout == BarLayout::Vertical ? 1 : 0, 0);
     SendDlgItemMessageW(state.hWnd, kBarMode, CB_SETCURSEL,
@@ -7663,6 +7697,9 @@ static void CommitScalarSettings(SettingsWindowState& state, bool refreshControl
     if (monitorNumber != CB_ERR) s.taskbarMonitorNumber = (int)monitorNumber;
     s.taskbarSide = SendDlgItemMessageW(state.hWnd, kTaskbarSide, CB_GETCURSEL, 0, 0) == 1 ?
                         TaskbarSide::Left : TaskbarSide::Right;
+    s.verticalAlignment = static_cast<WidgetVerticalAlignment>(
+        SendDlgItemMessageW(state.hWnd, kVerticalAlignment, CB_GETCURSEL, 0, 0));
+    s.verticalOffset = getBoundedInt(kVerticalOffset, s.verticalOffset);
     s.barLayout = SendDlgItemMessageW(state.hWnd, kBarLayout, CB_GETCURSEL, 0, 0) == 1 ?
                           BarLayout::Vertical : BarLayout::Stacked;
     s.barMode = SendDlgItemMessageW(state.hWnd, kBarMode, CB_GETCURSEL, 0, 0) == 1 ?
@@ -8469,6 +8506,8 @@ static void ResetCurrentSettingsPage(SettingsWindowState& state) {
         settings.taskbarMonitorMode = defaults.taskbarMonitorMode;
         settings.taskbarMonitorNumber = defaults.taskbarMonitorNumber;
         settings.taskbarSide = defaults.taskbarSide;
+        settings.verticalAlignment = defaults.verticalAlignment;
+        settings.verticalOffset = defaults.verticalOffset;
         settings.barLayout = defaults.barLayout;
         settings.barMode = defaults.barMode;
         settings.barLength = defaults.barLength;
@@ -8588,6 +8627,10 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hWnd, UINT message,
             HWND side = AddSettingsRow(*state, 1, L"Taskbar side", L"COMBOBOX",
                                        CBS_DROPDOWNLIST, 0, kTaskbarSide);
             AddComboItems(side, {L"Right (before clock and tray)", L"Left"});
+            HWND alignment = AddSettingsRow(*state, 1, L"Vertical alignment", L"COMBOBOX",
+                                            CBS_DROPDOWNLIST, 0, kVerticalAlignment);
+            AddComboItems(alignment, {L"Top", L"Center", L"Bottom"});
+            AddNumericRow(*state, 1, L"Vertical offset (px)", kVerticalOffset, -100, 100);
             HWND layout = AddSettingsRow(*state, 1, L"Bar layout", L"COMBOBOX",
                                          CBS_DROPDOWNLIST, 0, kBarLayout);
             AddComboItems(layout, {L"Stacked horizontal", L"Vertical"});
