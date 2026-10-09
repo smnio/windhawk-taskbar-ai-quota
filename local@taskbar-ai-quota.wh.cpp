@@ -2,7 +2,7 @@
 // @id              taskbar-ai-quota
 // @name            Taskbar AI Quota Bars
 // @description     Shows configurable AI agent/LLM subscription quota bars for Anthropic, OpenAI, and Google Antigravity on the Windows 11 taskbar
-// @version         1.6.13
+// @version         1.6.14
 // @author          Cleroth
 // @github          https://github.com/Cleroth
 // @include         explorer.exe
@@ -7773,7 +7773,18 @@ static void PopulateMonitorCombo(SettingsWindowState& state, const Settings& set
     state.monitorOptions = FindCurrentProcessTaskbarDisplays();
     int selectedDisplay = SelectedTaskbarDisplay(state.monitorOptions, settings);
     int selectedIndex = -1;
-    for (size_t i = 0; i < state.monitorOptions.size(); i++) {
+    // Sort dropdown rows without changing the discovery order used for legacy migration.
+    // Item data still points to the original monitor, so selection follows its identity.
+    std::vector<size_t> displayOrder;
+    for (size_t i = 0; i < state.monitorOptions.size(); ++i) displayOrder.push_back(i);
+    std::stable_sort(displayOrder.begin(), displayOrder.end(), [&](size_t a, size_t b) {
+        int aNumber = state.monitorOptions[a].monitorNumber;
+        int bNumber = state.monitorOptions[b].monitorNumber;
+        if (aNumber <= 0) return false;
+        if (bNumber <= 0) return true;
+        return aNumber < bNumber;
+    });
+    for (size_t i : displayOrder) {
         const auto& display = state.monitorOptions[i];
         int width = std::abs(display.rect.right - display.rect.left);
         int height = std::abs(display.rect.bottom - display.rect.top);

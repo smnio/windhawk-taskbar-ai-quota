@@ -1,5 +1,5 @@
 #requires -Version 7.0
-param([string]$ExpectedVersion = '1.6.12')
+param([string]$ExpectedVersion = '1.6.13')
 $ErrorActionPreference = 'Stop'
 $base = 'HKLM:\SOFTWARE\Windhawk\Engine\Mods\local@taskbar-ai-quota'
 $build = Join-Path $PSScriptRoot 'build'

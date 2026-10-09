@@ -1,4 +1,4 @@
-# Specific monitor selection (1.6.13)
+# Specific monitor selection (1.6.14)
 
 Previously, the specific-display dropdown showed primary-first taskbar list positions.
 Disconnecting another monitor could change that position and move the widget.
@@ -19,6 +19,10 @@ The connector ordering matches the supplied Identify screenshots. Microsoft's
 public display APIs do not document the Settings numbering algorithm; unusual
 multi-adapter or connector configurations may need further verification. This
 affects labels only: the saved monitor interface determines placement.
+
+Version 1.6.14 sorts dropdown entries by display number, placing unknown numbers
+and a disconnected selection last. Sorting rows preserves the monitor identity
+and the discovery order used only for importing old settings.
 
 The saved selection uses the monitor interface returned by `EnumDisplayDevicesW`
 with `EDD_GET_DEVICE_INTERFACE_NAME`, rather than a display number, HMONITOR,
