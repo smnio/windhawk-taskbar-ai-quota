@@ -123,7 +123,7 @@ Right-click any quota column and choose **Settings...**. Useful settings include
 - optional additional OpenAI rate limits in tooltips (Codex Spark, hidden model lanes such as `gpt-reserve`), hidden by default
 - click action: refresh account or open provider dashboard (Antigravity always refreshes)
 - cloud poll interval presets plus a custom interval (Antigravity polls its local server every minute)
-- taskbar monitor mode: primary, all, or a detected display with its resolution
+- taskbar monitor mode: primary, all, or a specific monitor identified by its current Windows display number and resolution; selection follows its monitor identity when displays disconnect, reconnect, or change number
 - taskbar side: left edge (default) or right before the clock and tray
 - vertical alignment: top, center (default), or bottom, plus a signed vertical offset
 - color thresholds with palette-matched previews
@@ -146,7 +146,7 @@ Signing in uses the public OAuth clients of the official CLIs (Claude Code for A
 
 - Windows 11 taskbar only.
 - x86-64 only.
-- Specific displays use detected taskbar order: `Display 1` is primary and later entries are secondary taskbars.
+- Specific-display selection remembers the Windows monitor interface. A disconnected selection stays saved and the widget returns when that monitor reconnects. Changing ports, docks, or display drivers can change that interface and require selecting it again.
 - Anthropic/OpenAI require one browser sign-in per configured account.
 - Antigravity requires a signed-in app or CLI session to remain running; older IDE builds may also require an open workspace.
 - OpenAI sign-in needs `localhost:1455` (or `1457`) free for the browser redirect.

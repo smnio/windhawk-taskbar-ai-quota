@@ -2,7 +2,7 @@
 // @id              taskbar-ai-quota
 // @name            Taskbar AI Quota Bars
 // @description     Shows configurable AI agent/LLM subscription quota bars for Anthropic, OpenAI, and Google Antigravity on the Windows 11 taskbar
-// @version         1.6.11
+// @version         1.6.12
 // @author          Cleroth
 // @github          https://github.com/Cleroth
 // @include         explorer.exe
@@ -203,7 +203,8 @@ struct Settings {
     ClickAction clickAction = ClickAction::Refresh;
     BarLayout barLayout = BarLayout::Stacked;
     BarMode barMode = BarMode::Used;
-    int taskbarMonitorNumber = 1;
+    int taskbarMonitorNumber = 1; // Last known Windows number; legacy files used list position.
+    std::wstring taskbarMonitorId;
     int pollMinutes = 10;
     int barLength = 100;
     int barThickness = 8;
@@ -393,6 +394,7 @@ static constexpr ULONGLONG kFileTimeUnixEpochOffsetMs = 11644473600000ULL;
 static constexpr ULONGLONG kUnixTimestampMsThreshold = 100000000000ULL;
 static constexpr UINT kSettingsRefreshMessage = WM_APP + 20;
 static constexpr UINT kExitVisualTestMessage = WM_APP + 21;
+static constexpr UINT kMonitorRefreshMessage = WM_APP + 22;
 static constexpr UINT_PTR kSettingsAutosaveTimer = 1;
 
 using WindowThreadProc = bool (*)(void*);
@@ -401,12 +403,15 @@ struct TaskbarDisplayInfo {
     bool primary = false;
     int monitorNumber = 0;
     RECT rect{};
+    std::wstring monitorId;
+    int enumerationOrder = 0; // Only for importing pre-1.6.12 list-based selection.
 };
 
 static bool RunFromWindowThread(HWND hWnd, WindowThreadProc proc, void* param, DWORD timeoutMs = 2000);
 static int ScaleForDpi(int value, UINT dpi);
 static UINT WindowDpi(HWND hWnd);
-static std::vector<TaskbarDisplayInfo> FindCurrentProcessTaskbarDisplays();
+static std::vector<TaskbarDisplayInfo> FindCurrentProcessTaskbarDisplays(
+    DWORD processId = GetCurrentProcessId());
 static std::vector<HWND> FindCurrentProcessTaskbarWnds();
 static QuotaUiInstance* FindUiState(HWND hWnd);
 static void UpdateQuotaUi(QuotaUiInstance& state);
@@ -414,12 +419,18 @@ static void PostUiUpdate();
 static void OpenSettingsWindow();
 static void SetVisualTestMode(bool enabled);
 static bool SaveOwnedSettings(const Settings& settings);
+static void RefreshSpecificMonitorSelection();
 static void PublishSettings(Settings settings, uint64_t oldIdentity = 0,
                             uint64_t newIdentity = 0);
 
 static void NotifySettingsWindowChanged() {
     if (HWND hWnd = g_settingsWindow.load()) {
         PostMessageW(hWnd, kSettingsRefreshMessage, 0, 0);
+    }
+}
+static void NotifyMonitorSettingsChanged() {
+    if (HWND hWnd = g_settingsWindow.load()) {
+        PostMessageW(hWnd, kMonitorRefreshMessage, 0, 0);
     }
 }
 static void RemoveQuotaGrid(HWND hWnd);
@@ -4013,19 +4024,18 @@ static bool RunFromWindowThread(HWND hWnd, WindowThreadProc proc, void* param, D
     return result;
 }
 
-static std::vector<TaskbarDisplayInfo> FindCurrentProcessTaskbarDisplays() {
+static std::vector<TaskbarDisplayInfo> FindCurrentProcessTaskbarDisplays(DWORD processId) {
     std::vector<HMONITOR> monitors;
     EnumDisplayMonitors(nullptr, nullptr,
-        [](HMONITOR hMonitor, HDC, LPRECT, LPARAM lp) CALLBACK -> BOOL {
-            reinterpret_cast<std::vector<HMONITOR>*>(lp)->push_back(hMonitor);
+        [](HMONITOR monitor, HDC, LPRECT, LPARAM param) CALLBACK -> BOOL {
+            reinterpret_cast<std::vector<HMONITOR>*>(param)->push_back(monitor);
             return TRUE;
         }, reinterpret_cast<LPARAM>(&monitors));
-
     struct EnumContext {
         DWORD pid;
         std::vector<HMONITOR>* monitors;
         std::vector<TaskbarDisplayInfo>* windows;
-    } ctx{GetCurrentProcessId(), &monitors, nullptr};
+    } ctx{processId, &monitors, nullptr};
 
     std::vector<TaskbarDisplayInfo> windows;
     ctx.windows = &windows;
@@ -4042,54 +4052,76 @@ static std::vector<TaskbarDisplayInfo> FindCurrentProcessTaskbarDisplays() {
         bool secondary = _wcsicmp(cls, L"Shell_SecondaryTrayWnd") == 0;
         if (!primary && !secondary) return TRUE;
 
-        int monitorNumber = 0;
-        HMONITOR hMonitor = MonitorFromWindow(hWnd, MONITOR_DEFAULTTONEAREST);
-        if (hMonitor) {
-            for (size_t i = 0; i < ctx->monitors->size(); ++i) {
-                if ((*ctx->monitors)[i] == hMonitor) {
-                    monitorNumber = (int)i + 1;
+        TaskbarDisplayInfo display;
+        display.hWnd = hWnd;
+        display.primary = primary;
+        HMONITOR hMonitor = MonitorFromWindow(hWnd, MONITOR_DEFAULTTONULL);
+        for (size_t i = 0; i < ctx->monitors->size(); ++i) {
+            if ((*ctx->monitors)[i] == hMonitor) display.enumerationOrder = (int)i + 1;
+        }
+        MONITORINFOEXW monitorInfo{};
+        monitorInfo.cbSize = sizeof(monitorInfo);
+        if (hMonitor && GetMonitorInfoW(hMonitor, &monitorInfo)) {
+            display.rect = monitorInfo.rcMonitor;
+            // DISPLAYn is Windows' current GDI display number, not enumeration order.
+            const wchar_t* number = wcsrchr(monitorInfo.szDevice, L'Y');
+            if (number) display.monitorNumber = _wtoi(number + 1);
+            DISPLAY_DEVICEW device{};
+            device.cb = sizeof(device);
+            for (DWORD i = 0; EnumDisplayDevicesW(monitorInfo.szDevice, i, &device,
+                                                 EDD_GET_DEVICE_INTERFACE_NAME); ++i) {
+                if ((device.StateFlags & DISPLAY_DEVICE_ACTIVE) && device.DeviceID[0]) {
+                    display.monitorId = device.DeviceID;
                     break;
                 }
+                device = {};
+                device.cb = sizeof(device);
             }
         }
-        MONITORINFO monitorInfo{};
-        monitorInfo.cbSize = sizeof(monitorInfo);
-        RECT rect{};
-        if (hMonitor && GetMonitorInfoW(hMonitor, &monitorInfo)) {
-            rect = monitorInfo.rcMonitor;
-        }
-        ctx->windows->push_back({hWnd, primary, monitorNumber, rect});
+        ctx->windows->push_back(std::move(display));
         return TRUE;
     }, reinterpret_cast<LPARAM>(&ctx));
 
+    // Keep old ordering solely to import the previous ordinal without moving its widget.
     std::sort(windows.begin(), windows.end(), [](const auto& a, const auto& b) {
         if (a.primary != b.primary) return a.primary;
-        if (a.monitorNumber != b.monitorNumber) {
-            if (a.monitorNumber == 0) return false;
-            if (b.monitorNumber == 0) return true;
-            return a.monitorNumber < b.monitorNumber;
-        }
+        if (a.enumerationOrder != b.enumerationOrder)
+            return a.enumerationOrder < b.enumerationOrder;
         return reinterpret_cast<UINT_PTR>(a.hWnd) < reinterpret_cast<UINT_PTR>(b.hWnd);
     });
     return windows;
 }
 
+// Preserve legacy list selection only until it can be bound to a monitor interface.
+// Once bound, a missing monitor must never fall back to another display with its old number.
+static int SelectedTaskbarDisplay(const std::vector<TaskbarDisplayInfo>& displays,
+                                 const Settings& settings) {
+    if (!settings.taskbarMonitorId.empty()) {
+        for (size_t i = 0; i < displays.size(); ++i) {
+            if (_wcsicmp(displays[i].monitorId.c_str(), settings.taskbarMonitorId.c_str()) == 0)
+                return (int)i;
+        }
+        return -1;
+    }
+    int index = settings.taskbarMonitorNumber - 1;
+    return index >= 0 && index < (int)displays.size() ? index : -1;
+}
+
 static std::vector<HWND> FindCurrentProcessTaskbarWnds() {
-    TaskbarMonitorMode mode;
-    int targetMonitorNumber;
+    Settings settings;
     {
         std::lock_guard<std::mutex> lk(g_settingsMutex);
-        mode = g_settings.taskbarMonitorMode;
-        targetMonitorNumber = g_settings.taskbarMonitorNumber;
+        settings = g_settings;
     }
+    TaskbarMonitorMode mode = settings.taskbarMonitorMode;
     std::vector<TaskbarDisplayInfo> windows = FindCurrentProcessTaskbarDisplays();
 
     std::vector<HWND> result;
     result.reserve(windows.size());
     if (mode == TaskbarMonitorMode::Specific) {
-        if (targetMonitorNumber >= 1 && targetMonitorNumber <= (int)windows.size()) {
-            result.push_back(windows[targetMonitorNumber - 1].hWnd);
-        }
+        int index = SelectedTaskbarDisplay(windows, settings);
+        if (index >= 0 && !settings.taskbarMonitorId.empty())
+            result.push_back(windows[index].hWnd);
         return result;
     }
 
@@ -5835,6 +5867,7 @@ static void RemoveAllQuotaGrids(bool waitForCompletion = false) {
 static LRESULT CALLBACK TopologyWindowProc(HWND hWnd, UINT message,
                                            WPARAM wParam, LPARAM lParam) {
     if (message == WM_DISPLAYCHANGE && !g_unloading) {
+        NotifyMonitorSettingsChanged();
         g_rebuildQuotaUiBeforeInject = true;
         if (g_injectEvent) SetEvent(g_injectEvent);
         return 0;
@@ -5897,8 +5930,10 @@ static DWORD WINAPI RetryInjectThreadProc(LPVOID) {
                     continue;
                 }
                 RemoveAllQuotaGrids();
+                NotifyMonitorSettingsChanged();
                 settleUntil = 0;
             }
+            RefreshSpecificMonitorSelection();
             auto hWnds = FindCurrentProcessTaskbarWnds();
             TaskbarMonitorMode mode;
             int targetMonitorNumber;
@@ -5935,7 +5970,10 @@ static DWORD WINAPI RetryInjectThreadProc(LPVOID) {
                 attempt = -1;  // A newer rebuild request supersedes this attempt series.
                 continue;
             }
-            if (allInjected) break;
+            if (allInjected) {
+                NotifyMonitorSettingsChanged();
+                break;
+            }
         }
         if (stopping) break;
     }
@@ -6070,6 +6108,7 @@ static void NormalizeSettings(Settings* s) {
         s->verticalAlignment = WidgetVerticalAlignment::Center;
     }
     s->verticalOffset = std::clamp(s->verticalOffset, -100, 100);
+    if (s->taskbarMonitorId.size() > 512) s->taskbarMonitorId.resize(512);
     s->taskbarMonitorNumber = std::clamp(s->taskbarMonitorNumber > 0 ?
                                              s->taskbarMonitorNumber : 1, 1, 64);
     s->barLength = std::clamp(s->barLength > 0 ? s->barLength : 100, 10, 500);
@@ -6133,6 +6172,7 @@ static std::wstring SerializeSettings(const Settings& s) {
         setString(L"monitorMode", s.taskbarMonitorMode == TaskbarMonitorMode::All ? L"all" :
                                    s.taskbarMonitorMode == TaskbarMonitorMode::Specific ? L"specific" : L"primary");
         setNumber(L"monitorNumber", s.taskbarMonitorNumber);
+        setString(L"monitorId", s.taskbarMonitorId.c_str());
         setString(L"taskbarSide", s.taskbarSide == TaskbarSide::Left ? L"left" : L"right");
         setString(L"verticalAlignment", s.verticalAlignment == WidgetVerticalAlignment::Top ? L"top" :
                                         s.verticalAlignment == WidgetVerticalAlignment::Bottom ? L"bottom" : L"center");
@@ -6219,6 +6259,7 @@ static bool DeserializeSettings(const std::wstring& json, Settings* out) {
                                monitorMode == L"specific" ? TaskbarMonitorMode::Specific :
                                                             TaskbarMonitorMode::Primary;
         s.taskbarMonitorNumber = (int)GetNum(root, L"monitorNumber", 1);
+        s.taskbarMonitorId = GetStr(root, L"monitorId");
         s.taskbarSide = GetStr(root, L"taskbarSide") == L"right" ?
                             TaskbarSide::Right : TaskbarSide::Left;
         std::wstring alignment = GetStr(root, L"verticalAlignment");
@@ -6562,6 +6603,42 @@ static void SetVisualTestMode(bool enabled) {
     NotifySettingsWindowChanged();
 }
 
+static void RefreshSpecificMonitorSelection() {
+    if (g_unloading || g_settingsLoadError) return;
+    auto displays = FindCurrentProcessTaskbarDisplays();
+    bool changed = false;
+    {
+        std::lock_guard<std::mutex> configLock(g_configEditMutex);
+        Settings settings;
+        {
+            std::lock_guard<std::mutex> lk(g_settingsMutex);
+            settings = g_settings;
+        }
+        if (settings.taskbarMonitorMode != TaskbarMonitorMode::Specific) return;
+        int index = SelectedTaskbarDisplay(displays, settings);
+        if (index < 0 || displays[index].monitorId.empty()) return;
+        const auto& display = displays[index];
+        if (settings.taskbarMonitorId == display.monitorId &&
+            settings.taskbarMonitorNumber == display.monitorNumber) return;
+        settings.taskbarMonitorId = display.monitorId;
+        settings.taskbarMonitorNumber = display.monitorNumber;
+        bool apartmentInitialized = false;
+        try {
+            winrt::init_apartment(winrt::apartment_type::multi_threaded);
+            apartmentInitialized = true;
+        } catch (...) {}
+        bool saved = SaveOwnedSettings(settings);
+        if (apartmentInitialized) winrt::uninit_apartment();
+        if (saved) {
+            std::lock_guard<std::mutex> lk(g_settingsMutex);
+            g_settings.taskbarMonitorId = settings.taskbarMonitorId;
+            g_settings.taskbarMonitorNumber = settings.taskbarMonitorNumber;
+            changed = true;
+        }
+    }
+    if (changed) NotifyMonitorSettingsChanged();
+}
+
 static void LoadSettings() {
     bool apartmentInitialized = false;
     try {
@@ -6588,6 +6665,7 @@ static void LoadSettings() {
         g_settingsLoadError = true;
     }
     PublishSettings(std::move(s));
+    RefreshSpecificMonitorSelection();
     if (apartmentInitialized) winrt::uninit_apartment();
 }
 
@@ -6683,6 +6761,7 @@ struct SettingsWindowState {
     HWND rowsPageLabel = nullptr;
     HWND nextRowsButton = nullptr;
     HWND accountList = nullptr;
+    std::vector<TaskbarDisplayInfo> monitorOptions;
     HWND toolTip = nullptr;
     HWND colorDialog = nullptr;
     std::array<std::vector<HWND>, 4> pageControls;
@@ -7597,28 +7676,27 @@ static void UpdateDependentSettingsControls(SettingsWindowState& state) {
                                           CB_GETCURSEL, 0, 0) == 6);
 }
 
-static void PopulateMonitorCombo(SettingsWindowState& state, int selectedMonitorNumber) {
+static void PopulateMonitorCombo(SettingsWindowState& state, const Settings& settings) {
     HWND combo = GetDlgItem(state.hWnd, kMonitorNumber);
     SendMessageW(combo, CB_RESETCONTENT, 0, 0);
-    auto displays = FindCurrentProcessTaskbarDisplays();
+    state.monitorOptions = FindCurrentProcessTaskbarDisplays();
+    int selectedDisplay = SelectedTaskbarDisplay(state.monitorOptions, settings);
     int selectedIndex = -1;
-    for (size_t i = 0; i < displays.size(); i++) {
-        const auto& display = displays[i];
+    for (size_t i = 0; i < state.monitorOptions.size(); i++) {
+        const auto& display = state.monitorOptions[i];
         int width = std::abs(display.rect.right - display.rect.left);
         int height = std::abs(display.rect.bottom - display.rect.top);
         wchar_t text[128];
-        swprintf(text, ARRAYSIZE(text), L"Display %d - %dx%d%s", (int)i + 1,
+        swprintf(text, ARRAYSIZE(text), L"Display %d - %dx%d%s", display.monitorNumber,
                  width, height, display.primary ? L" (Primary)" : L"");
         int item = (int)SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(text));
-        SendMessageW(combo, CB_SETITEMDATA, item, (LPARAM)(i + 1));
-        if ((int)i + 1 == selectedMonitorNumber) selectedIndex = item;
+        SendMessageW(combo, CB_SETITEMDATA, item, (LPARAM)i);
+        if ((int)i == selectedDisplay) selectedIndex = item;
     }
     if (selectedIndex < 0) {
-        wchar_t text[96];
-        swprintf(text, ARRAYSIZE(text), L"Display %d - unavailable", selectedMonitorNumber);
         selectedIndex = (int)SendMessageW(combo, CB_ADDSTRING, 0,
-                                          reinterpret_cast<LPARAM>(text));
-        SendMessageW(combo, CB_SETITEMDATA, selectedIndex, selectedMonitorNumber);
+            reinterpret_cast<LPARAM>(L"Selected display - disconnected or unavailable"));
+        SendMessageW(combo, CB_SETITEMDATA, selectedIndex, (LPARAM)-1);
     }
     SendMessageW(combo, CB_SETCURSEL, selectedIndex, 0);
 }
@@ -7633,7 +7711,7 @@ static void RefreshSettingsControls(SettingsWindowState& state) {
     SendDlgItemMessageW(state.hWnd, kMonitorMode, CB_SETCURSEL,
                         s.taskbarMonitorMode == TaskbarMonitorMode::All ? 1 :
                         s.taskbarMonitorMode == TaskbarMonitorMode::Specific ? 2 : 0, 0);
-    PopulateMonitorCombo(state, s.taskbarMonitorNumber);
+    PopulateMonitorCombo(state, s);
     SendDlgItemMessageW(state.hWnd, kTaskbarSide, CB_SETCURSEL,
                         s.taskbarSide == TaskbarSide::Left ? 1 : 0, 0);
     SendDlgItemMessageW(state.hWnd, kVerticalAlignment, CB_SETCURSEL,
@@ -7722,7 +7800,13 @@ static void CommitScalarSettings(SettingsWindowState& state, bool refreshControl
     LRESULT monitorNumber = monitorSelection >= 0 ?
         SendDlgItemMessageW(state.hWnd, kMonitorNumber, CB_GETITEMDATA,
                             monitorSelection, 0) : CB_ERR;
-    if (monitorNumber != CB_ERR) s.taskbarMonitorNumber = (int)monitorNumber;
+    if (monitorNumber >= 0 && monitorNumber < (LRESULT)state.monitorOptions.size()) {
+        const auto& display = state.monitorOptions[(size_t)monitorNumber];
+        if (!display.monitorId.empty()) {
+            s.taskbarMonitorNumber = display.monitorNumber;
+            s.taskbarMonitorId = display.monitorId;
+        }
+    }
     s.taskbarSide = SendDlgItemMessageW(state.hWnd, kTaskbarSide, CB_GETCURSEL, 0, 0) == 1 ?
                         TaskbarSide::Left : TaskbarSide::Right;
     s.verticalAlignment = static_cast<WidgetVerticalAlignment>(
@@ -8533,6 +8617,7 @@ static void ResetCurrentSettingsPage(SettingsWindowState& state) {
     if (page == 1) {
         settings.taskbarMonitorMode = defaults.taskbarMonitorMode;
         settings.taskbarMonitorNumber = defaults.taskbarMonitorNumber;
+        settings.taskbarMonitorId = defaults.taskbarMonitorId;
         settings.taskbarSide = defaults.taskbarSide;
         settings.verticalAlignment = defaults.verticalAlignment;
         settings.verticalOffset = defaults.verticalOffset;
@@ -9032,13 +9117,13 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hWnd, UINT message,
             return 0;
         case WM_DISPLAYCHANGE:
             if (state) {
-                int monitorNumber;
+                Settings settings;
                 {
                     std::lock_guard<std::mutex> lk(g_settingsMutex);
-                    monitorNumber = g_settings.taskbarMonitorNumber;
+                    settings = g_settings;
                 }
                 state->updating = true;
-                PopulateMonitorCombo(*state, monitorNumber);
+                PopulateMonitorCombo(*state, settings);
                 state->updating = false;
                 UpdateDependentSettingsControls(*state);
                 StartRetryInject(true);
@@ -9055,6 +9140,19 @@ static LRESULT CALLBACK SettingsWindowProc(HWND hWnd, UINT message,
             return 0;
         case kExitVisualTestMessage:
             SetVisualTestMode(false);
+            return 0;
+        case kMonitorRefreshMessage:
+            if (state) {
+                Settings settings;
+                {
+                    std::lock_guard<std::mutex> lk(g_settingsMutex);
+                    settings = g_settings;
+                }
+                state->updating = true;
+                PopulateMonitorCombo(*state, settings);
+                state->updating = false;
+                UpdateDependentSettingsControls(*state);
+            }
             return 0;
         case kSettingsRefreshMessage:
             if (state) {

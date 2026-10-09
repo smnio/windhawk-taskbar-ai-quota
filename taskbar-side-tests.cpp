@@ -20,6 +20,7 @@ int main() {
             settings.verticalOffset == 0, "vertical default is centered without offset");
     settings.taskbarMonitorMode = TaskbarMonitorMode::Specific;
     settings.taskbarMonitorNumber = 2;
+    settings.taskbarMonitorId = L"monitor-B";
     settings.barLength = 60;
     settings.accounts = {{L"openai", L"Personal Codex"}, {L"anthropic", L"Personal Claude"}};
     auto codexIdentity = AccountIdentityHash(settings.accounts[0]);
@@ -64,6 +65,35 @@ int main() {
     settings.taskbarSide = static_cast<TaskbarSide>(123);
     NormalizeSettings(&settings);
     Require(settings.taskbarSide == TaskbarSide::Left, "invalid enum normalizes left");
+    TaskbarDisplayInfo first, second;
+    first.monitorNumber = 1;
+    first.monitorId = L"monitor-A";
+    second.monitorNumber = 2;
+    second.monitorId = L"MONITOR-b";
+    std::vector<TaskbarDisplayInfo> displays{first, second};
+    Require(SelectedTaskbarDisplay(displays, settings) == 1, "monitor identity matches case-insensitively");
+    displays = {second, first};
+    displays[0].monitorNumber = 4;
+    Require(SelectedTaskbarDisplay(displays, settings) == 0, "reordering and Windows renumbering preserve monitor selection");
+    displays = {first};
+    displays[0].monitorNumber = 2;
+    Require(SelectedTaskbarDisplay(displays, settings) == -1, "disconnected monitor does not fall back to its reused number");
+    displays.push_back(second);
+    Require(SelectedTaskbarDisplay(displays, settings) == 1, "reconnected monitor restores its selection");
+    Settings oldSelection = settings;
+    oldSelection.taskbarMonitorId.clear();
+    Require(SelectedTaskbarDisplay(displays, oldSelection) == 1, "legacy ordinal can bind to current monitor");
+    legacy.Remove(L"monitorId");
+    Require(DeserializeSettings(legacy.Stringify().c_str(), &migrated) &&
+            migrated.taskbarMonitorId.empty(), "older JSON keeps legacy selection available for migration");
+    auto liveDisplays = FindCurrentProcessTaskbarDisplays(PrimaryTaskbarProcessId());
+    Require(!liveDisplays.empty(), "live taskbar discovery");
+    for (const auto& display : liveDisplays) {
+        Require(display.monitorNumber > 0 && !display.monitorId.empty(), "live Windows display number and monitor identity");
+        std::printf("Live display %d: %ldx%ld%s\n", display.monitorNumber,
+            display.rect.right - display.rect.left, display.rect.bottom - display.rect.top,
+            display.primary ? " (primary)" : "");
+    }
     ThresholdNotificationState notification;
     Require(!UpdateThresholdNotification(notification, 20, 1000, 90, true), "initial observation is silent");
     Require(UpdateThresholdNotification(notification, 95, 1000, 90, true), "first threshold crossing notifies");
