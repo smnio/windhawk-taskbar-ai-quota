@@ -2,7 +2,7 @@
 // @id              taskbar-ai-quota
 // @name            Taskbar AI Quota Bars
 // @description     Shows configurable AI agent/LLM subscription quota bars for Anthropic, OpenAI, and Google Antigravity on the Windows 11 taskbar
-// @version         1.6.12
+// @version         1.6.13
 // @author          Cleroth
 // @github          https://github.com/Cleroth
 // @include         explorer.exe
@@ -4024,6 +4024,96 @@ static bool RunFromWindowThread(HWND hWnd, WindowThreadProc proc, void* param, D
     return result;
 }
 
+struct MonitorNumberInfo {
+    std::wstring monitorId;
+    std::wstring adapterPath;
+    DISPLAYCONFIG_VIDEO_OUTPUT_TECHNOLOGY technology = DISPLAYCONFIG_OUTPUT_TECHNOLOGY_OTHER;
+    UINT connectorInstance = 0;
+    UINT targetId = 0;
+    LUID adapterId{};
+};
+
+static int DisplayConnectorPriority(DISPLAYCONFIG_VIDEO_OUTPUT_TECHNOLOGY technology) {
+    switch (technology) {
+        case DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INTERNAL: return 0;
+        case DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DISPLAYPORT_EMBEDDED: return 1;
+        case DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DVI: return 2;
+        case DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DISPLAYPORT_EXTERNAL: return 3;
+        case DISPLAYCONFIG_OUTPUT_TECHNOLOGY_HDMI: return 4;
+        default: return 5;
+    }
+}
+
+static void SortMonitorNumbers(std::vector<MonitorNumberInfo>& monitors) {
+    // Settings' Identify numbers follow target/connector order, not GDI source names
+    // or QueryDisplayConfig's active-path priority order. Include connected inactive
+    // targets too, since Windows Settings still shows those displays.
+    std::sort(monitors.begin(), monitors.end(), [](const auto& a, const auto& b) {
+        int adapter = _wcsicmp(a.adapterPath.c_str(), b.adapterPath.c_str());
+        if (adapter != 0) return adapter < 0;
+        int aPriority = DisplayConnectorPriority(a.technology);
+        int bPriority = DisplayConnectorPriority(b.technology);
+        if (aPriority != bPriority) return aPriority < bPriority;
+        if (a.connectorInstance != b.connectorInstance)
+            return a.connectorInstance < b.connectorInstance;
+        return a.targetId < b.targetId;
+    });
+}
+
+static std::vector<MonitorNumberInfo> QueryMonitorNumbers() {
+    // A topology change can invalidate the buffer sizes between these two calls.
+    for (int attempt = 0; attempt < 3 && !g_unloading; ++attempt) {
+        UINT pathCount = 0, modeCount = 0;
+        if (GetDisplayConfigBufferSizes(QDC_ALL_PATHS, &pathCount, &modeCount) != ERROR_SUCCESS ||
+            !pathCount || pathCount > 65536 || modeCount > 65536) return {};
+        std::vector<DISPLAYCONFIG_PATH_INFO> paths(pathCount);
+        std::vector<DISPLAYCONFIG_MODE_INFO> modes(modeCount);
+        LONG result = QueryDisplayConfig(QDC_ALL_PATHS, &pathCount, paths.data(),
+                                        &modeCount, modes.data(), nullptr);
+        if (result == ERROR_INSUFFICIENT_BUFFER) continue;
+        if (result != ERROR_SUCCESS) return {};
+        std::vector<MonitorNumberInfo> monitors;
+        for (UINT i = 0; i < pathCount; ++i) {
+            const auto& target = paths[i].targetInfo;
+            if (!target.targetAvailable) continue;
+            // ALL_PATHS repeats each target for its possible source assignments.
+            bool seen = std::any_of(monitors.begin(), monitors.end(), [&](const auto& monitor) {
+                return monitor.targetId == target.id &&
+                    monitor.adapterId.HighPart == target.adapterId.HighPart &&
+                    monitor.adapterId.LowPart == target.adapterId.LowPart;
+            });
+            if (seen) continue;
+            DISPLAYCONFIG_TARGET_DEVICE_NAME name{};
+            name.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
+            name.header.size = sizeof(name);
+            name.header.adapterId = target.adapterId;
+            name.header.id = target.id;
+            DISPLAYCONFIG_ADAPTER_NAME adapter{};
+            adapter.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_ADAPTER_NAME;
+            adapter.header.size = sizeof(adapter);
+            adapter.header.adapterId = target.adapterId;
+            if (DisplayConfigGetDeviceInfo(&name.header) != ERROR_SUCCESS ||
+                DisplayConfigGetDeviceInfo(&adapter.header) != ERROR_SUCCESS ||
+                !name.monitorDevicePath[0]) return {}; // Don't invent a number on partial data.
+            monitors.push_back({name.monitorDevicePath, adapter.adapterDevicePath,
+                target.outputTechnology, name.connectorInstance, target.id, target.adapterId});
+        }
+        SortMonitorNumbers(monitors);
+        return monitors;
+    }
+    return {};
+}
+
+static int WindowsMonitorNumber(const std::vector<MonitorNumberInfo>& monitors,
+                                const std::wstring& monitorId) {
+    if (monitorId.empty()) return 0;
+    for (size_t i = 0; i < monitors.size(); ++i) {
+        if (_wcsicmp(monitors[i].monitorId.c_str(), monitorId.c_str()) == 0)
+            return (int)i + 1;
+    }
+    return 0;
+}
+
 static std::vector<TaskbarDisplayInfo> FindCurrentProcessTaskbarDisplays(DWORD processId) {
     std::vector<HMONITOR> monitors;
     EnumDisplayMonitors(nullptr, nullptr,
@@ -4063,9 +4153,6 @@ static std::vector<TaskbarDisplayInfo> FindCurrentProcessTaskbarDisplays(DWORD p
         monitorInfo.cbSize = sizeof(monitorInfo);
         if (hMonitor && GetMonitorInfoW(hMonitor, &monitorInfo)) {
             display.rect = monitorInfo.rcMonitor;
-            // DISPLAYn is Windows' current GDI display number, not enumeration order.
-            const wchar_t* number = wcsrchr(monitorInfo.szDevice, L'Y');
-            if (number) display.monitorNumber = _wtoi(number + 1);
             DISPLAY_DEVICEW device{};
             device.cb = sizeof(device);
             for (DWORD i = 0; EnumDisplayDevicesW(monitorInfo.szDevice, i, &device,
@@ -4081,6 +4168,10 @@ static std::vector<TaskbarDisplayInfo> FindCurrentProcessTaskbarDisplays(DWORD p
         ctx->windows->push_back(std::move(display));
         return TRUE;
     }, reinterpret_cast<LPARAM>(&ctx));
+
+    auto monitorNumbers = QueryMonitorNumbers();
+    for (auto& window : windows)
+        window.monitorNumber = WindowsMonitorNumber(monitorNumbers, window.monitorId);
 
     // Keep old ordering solely to import the previous ordinal without moving its widget.
     std::sort(windows.begin(), windows.end(), [](const auto& a, const auto& b) {
@@ -6619,9 +6710,9 @@ static void RefreshSpecificMonitorSelection() {
         if (index < 0 || displays[index].monitorId.empty()) return;
         const auto& display = displays[index];
         if (settings.taskbarMonitorId == display.monitorId &&
-            settings.taskbarMonitorNumber == display.monitorNumber) return;
+            (display.monitorNumber <= 0 || settings.taskbarMonitorNumber == display.monitorNumber)) return;
         settings.taskbarMonitorId = display.monitorId;
-        settings.taskbarMonitorNumber = display.monitorNumber;
+        if (display.monitorNumber > 0) settings.taskbarMonitorNumber = display.monitorNumber;
         bool apartmentInitialized = false;
         try {
             winrt::init_apartment(winrt::apartment_type::multi_threaded);
@@ -7687,8 +7778,12 @@ static void PopulateMonitorCombo(SettingsWindowState& state, const Settings& set
         int width = std::abs(display.rect.right - display.rect.left);
         int height = std::abs(display.rect.bottom - display.rect.top);
         wchar_t text[128];
-        swprintf(text, ARRAYSIZE(text), L"Display %d - %dx%d%s", display.monitorNumber,
-                 width, height, display.primary ? L" (Primary)" : L"");
+        if (display.monitorNumber > 0)
+            swprintf(text, ARRAYSIZE(text), L"Display %d - %dx%d%s", display.monitorNumber,
+                     width, height, display.primary ? L" (Primary)" : L"");
+        else
+            swprintf(text, ARRAYSIZE(text), L"Display number unavailable - %dx%d%s",
+                     width, height, display.primary ? L" (Primary)" : L"");
         int item = (int)SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(text));
         SendMessageW(combo, CB_SETITEMDATA, item, (LPARAM)i);
         if ((int)i == selectedDisplay) selectedIndex = item;
@@ -7803,7 +7898,7 @@ static void CommitScalarSettings(SettingsWindowState& state, bool refreshControl
     if (monitorNumber >= 0 && monitorNumber < (LRESULT)state.monitorOptions.size()) {
         const auto& display = state.monitorOptions[(size_t)monitorNumber];
         if (!display.monitorId.empty()) {
-            s.taskbarMonitorNumber = display.monitorNumber;
+            if (display.monitorNumber > 0) s.taskbarMonitorNumber = display.monitorNumber;
             s.taskbarMonitorId = display.monitorId;
         }
     }

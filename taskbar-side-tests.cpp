@@ -86,6 +86,32 @@ int main() {
     legacy.Remove(L"monitorId");
     Require(DeserializeSettings(legacy.Stringify().c_str(), &migrated) &&
             migrated.taskbarMonitorId.empty(), "older JSON keeps legacy selection available for migration");
+    std::vector<MonitorNumberInfo> numbers{
+        {L"monitor-C", L"adapter", DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DISPLAYPORT_EXTERNAL, 2, 4358},
+        {L"monitor-B", L"adapter", DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DISPLAYPORT_EXTERNAL, 1, 4356},
+        {L"monitor-A", L"adapter", DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DISPLAYPORT_EXTERNAL, 0, 4353},
+    };
+    SortMonitorNumbers(numbers);
+    Require(WindowsMonitorNumber(numbers, L"MONITOR-c") == 3 &&
+            WindowsMonitorNumber(numbers, L"monitor-A") == 1,
+            "Identify numbers follow connector order, not active path/GDI source order");
+    numbers.erase(numbers.begin());
+    SortMonitorNumbers(numbers);
+    Require(WindowsMonitorNumber(numbers, L"monitor-C") == 2 &&
+            WindowsMonitorNumber(numbers, L"monitor-A") == 0,
+            "disconnect renumbers remaining connected monitors without reassigning identity");
+    numbers.push_back({L"monitor-A", L"adapter", DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DISPLAYPORT_EXTERNAL, 0, 4353});
+    SortMonitorNumbers(numbers);
+    Require(WindowsMonitorNumber(numbers, L"monitor-C") == 3,
+            "reconnection restores current Identify numbering");
+    numbers.push_back({L"internal", L"adapter", DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INTERNAL, 0, 10});
+    numbers.push_back({L"hdmi", L"adapter", DISPLAYCONFIG_OUTPUT_TECHNOLOGY_HDMI, 0, 20});
+    SortMonitorNumbers(numbers);
+    Require(WindowsMonitorNumber(numbers, L"internal") == 1 &&
+            WindowsMonitorNumber(numbers, L"hdmi") == 5,
+            "connector technology priority is independent of primary and desktop position");
+    Require(WindowsMonitorNumber({}, L"monitor-C") == 0 && WindowsMonitorNumber(numbers, L"") == 0,
+            "unavailable mapping never fabricates a GDI number");
     auto liveDisplays = FindCurrentProcessTaskbarDisplays(PrimaryTaskbarProcessId());
     Require(!liveDisplays.empty(), "live taskbar discovery");
     for (const auto& display : liveDisplays) {
@@ -126,6 +152,6 @@ int main() {
     Require(NotificationStorageKey(codexIdentity, 0) != NotificationStorageKey(claudeIdentity, 0) &&
             NotificationStorageKey(codexIdentity, 0) != NotificationStorageKey(codexIdentity, 1),
             "deduplication is independent per account and quota bar");
-    std::puts("PASS: placement/settings preservation and notification disable, once-per-window, reload, startup, independent quota state");
+    std::puts("PASS: monitor identity/Identify numbering, placement/settings preservation, and notification deduplication");
     winrt::uninit_apartment();
 }
